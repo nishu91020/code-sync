@@ -10,15 +10,24 @@
   },
   "devDependencies": {
     "prettier": "^3.7.4",
+    "prisma": "^7.8.0",
     "turbo": "^2.10.3",
     "typescript": "5.9.2"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=26.4.0"
   },
   "packageManager": "npm@10.7.0",
   "workspaces": [
     "apps/*",
     "packages/*"
-  ]
+  ],
+  "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "@prisma/client": "^7.8.0",
+    "monaco-editor": "^0.55.1",
+    "prism": "^4.1.2",
+    "y-monaco": "^0.1.6",
+    "yjs": "^13.6.31"
+  }
 }
