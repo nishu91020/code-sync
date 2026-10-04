@@ -1,0 +1,2 @@
+#!/bin/sh
+exec node /workspace/main.js < /workspace/input.txt

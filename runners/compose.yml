@@ -1,0 +1,41 @@
+# Language runner images. One image per language; the backend starts a
+# container from one only when a room selects that language.
+#
+#   npm run runners:build              # build every language
+#   npm run runners:build -- python go # build a subset
+#
+# These services are only build definitions. Do not `up` this file: the backend
+# creates, sandboxes and destroys runner containers itself.
+name: codesync-runners
+
+services:
+  javascript:
+    build: ./javascript
+    image: codesync-runner-javascript:latest
+  typescript:
+    build: ./typescript
+    image: codesync-runner-typescript:latest
+  python:
+    build: ./python
+    image: codesync-runner-python:latest
+  java:
+    build: ./java
+    image: codesync-runner-java:latest
+  cpp:
+    build: ./cpp
+    image: codesync-runner-cpp:latest
+  csharp:
+    build: ./csharp
+    image: codesync-runner-csharp:latest
+  php:
+    build: ./php
+    image: codesync-runner-php:latest
+  ruby:
+    build: ./ruby
+    image: codesync-runner-ruby:latest
+  go:
+    build: ./go
+    image: codesync-runner-go:latest
+  rust:
+    build: ./rust
+    image: codesync-runner-rust:latest

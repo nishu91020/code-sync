@@ -1,0 +1,2 @@
+#!/bin/sh
+exec python3 -u /workspace/main.py < /workspace/input.txt

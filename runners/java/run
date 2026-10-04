@@ -1,0 +1,5 @@
+#!/bin/sh
+# Source-file mode compiles in memory and does not require the public class
+# name to match the file name.
+exec java -XX:+UseSerialGC -XX:-UsePerfData -XX:MaxRAMPercentage=60 \
+  /workspace/Main.java < /workspace/input.txt

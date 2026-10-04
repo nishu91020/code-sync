@@ -1,0 +1,3 @@
+#!/bin/sh
+go build -o /workspace/main /workspace/main.go || exit $?
+exec /workspace/main < /workspace/input.txt

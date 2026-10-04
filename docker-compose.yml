@@ -31,6 +31,9 @@ services:
       timeout: 5s
       retries: 5
 
+# Code runs in per-language images built from runners/ (npm run runners:build).
+# The backend starts those containers itself, so they are not services here.
+
 volumes:
   postgres_data:
   redis_data:

@@ -1,0 +1,2 @@
+#!/bin/sh
+exec tsx /workspace/main.ts < /workspace/input.txt

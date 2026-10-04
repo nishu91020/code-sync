@@ -1,0 +1,2 @@
+#!/bin/sh
+exec ruby /workspace/main.rb < /workspace/input.txt

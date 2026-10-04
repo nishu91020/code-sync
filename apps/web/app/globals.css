@@ -1,15 +1,24 @@
+@import "tailwindcss";
 @import "tw-animate-css";
 
 html,
 body {
+  height: 100%;
   max-width: 100vw;
   overflow-x: hidden;
 }
 
-* {
-  box-sizing: border-box;
-  padding: 0;
-  margin: 0;
+/*
+ * Must stay inside a layer: unlayered rules beat every Tailwind v4 utility
+ * (which live in @layer utilities), so an unlayered reset silently disabled
+ * all p-* / m-* classes.
+ */
+@layer base {
+  * {
+    box-sizing: border-box;
+    padding: 0;
+    margin: 0;
+  }
 }
 
 a {

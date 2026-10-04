@@ -18,3 +18,48 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+/// A collaboration room. `slug` is the public id used in URLs and as the
+/// suffix of the Yjs document name (`room-<slug>`).
+///
+/// Rooms are access-controlled: the creator is the host, identified by a
+/// secret token of which only the SHA-256 hash is stored. Rooms created before
+/// access control have no host and cannot be joined.
+model Room {
+  id            String       @id @default(cuid())
+  slug          String       @unique
+  name          String?
+  language      String       @default("javascript")
+  hostName      String?
+  hostTokenHash String?
+  createdAt     DateTime     @default(now())
+  lastActiveAt  DateTime     @default(now())
+  docState      DocState?
+  members       RoomMember[]
+
+  @@index([lastActiveAt])
+}
+
+/// Someone the host admitted to a room. Only a hash of their access token is
+/// stored; removing the row revokes their access.
+model RoomMember {
+  id         String   @id @default(cuid())
+  roomId     String
+  room       Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  name       String
+  tokenHash  String   @unique
+  admittedAt DateTime @default(now())
+
+  @@index([roomId])
+}
+
+/// The latest persisted snapshot of a room's Yjs document, stored as the
+/// binary output of `Y.encodeStateAsUpdate`.
+model DocState {
+  id        String   @id @default(cuid())
+  roomId    String   @unique
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  update    Bytes
+  version   Int      @default(0)
+  updatedAt DateTime @updatedAt
+}

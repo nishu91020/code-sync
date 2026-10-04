@@ -1,0 +1,4 @@
+# The run scripts execute inside Linux containers; CRLF would break the shebang.
+run text eol=lf
+*.go text eol=lf
+Dockerfile text eol=lf
