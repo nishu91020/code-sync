@@ -10,6 +10,10 @@ deterministically without a central locking or operational-transform server.
 
 ## Architecture
 
+> For the design decisions behind this structure — why a CRDT, why Postgres,
+> why one container per run, and the tradeoffs each choice accepted — see
+> **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+
 ```
 apps/web        Next.js 16 app (App Router) + Monaco editor
 apps/backend    Express + ws server speaking the y-websocket protocol

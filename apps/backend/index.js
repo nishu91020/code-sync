@@ -12,6 +12,7 @@ import {
   roomEvents,
   setupWSConnection,
   setStorage,
+  setPubSub,
   flushAll,
   updateRoomState,
   getRoomSource,
@@ -19,6 +20,7 @@ import {
   closeConnections
 } from './lib/yjsWebsocket.js'
 import { createStorage } from './lib/storage.js'
+import { createPubSub } from './lib/pubsub.js'
 import {
   AccessError,
   CLOSE_CODES,
@@ -38,20 +40,30 @@ import { createRateLimiter } from './lib/rateLimit.js'
 const PORT = Number(process.env.PORT || 3001)
 const MAX_WS_PAYLOAD = 10 * 1024 * 1024
 
+const storage = await createStorage()
+setStorage(storage)
+const access = createAccessControl({ storage })
+
+// Relays room traffic between backend instances. Without Redis this is a
+// no-op, because one instance already reaches every client it serves.
+const pubsub = await createPubSub()
+setPubSub(pubsub)
+
 const runLimiter = createRateLimiter({
   limit: Number(process.env.RUN_RATE_LIMIT || 10),
-  windowMs: Number(process.env.RUN_RATE_WINDOW_MS || 60000)
+  windowMs: Number(process.env.RUN_RATE_WINDOW_MS || 60000),
+  // Shared so the limit is per room, not per room per instance.
+  redis: pubsub.redis,
+  prefix: 'codesync:rl:run'
 })
 
 // Stops one client from flooding a host with join requests.
 const joinLimiter = createRateLimiter({
   limit: Number(process.env.JOIN_RATE_LIMIT || 10),
-  windowMs: 60000
+  windowMs: 60000,
+  redis: pubsub.redis,
+  prefix: 'codesync:rl:join'
 })
-
-const storage = await createStorage()
-setStorage(storage)
-const access = createAccessControl({ storage })
 
 // Each language's runner container exists only while some active room has
 // that language selected.
@@ -160,7 +172,7 @@ app.get(
 app.post(
   '/api/room/:roomId/join-requests',
   route(async (req, res) => {
-    const { allowed, retryAfterMs } = joinLimiter.check(`join:${req.ip}`)
+    const { allowed, retryAfterMs } = await joinLimiter.check(`join:${req.ip}`)
     if (!allowed) {
       res.set('Retry-After', String(Math.ceil(retryAfterMs / 1000)))
       res.status(429).json({ error: 'Too many join requests. Try again shortly.' })
@@ -276,7 +288,7 @@ app.post('/api/room/:roomId/run', requireRoomAccess(), async (req, res, next) =>
       return
     }
 
-    const { allowed, retryAfterMs } = runLimiter.check(docName)
+    const { allowed, retryAfterMs } = await runLimiter.check(docName)
     if (!allowed) {
       res.set('Retry-After', String(Math.ceil(retryAfterMs / 1000)))
       res.status(429).json({ error: 'Too many runs for this room. Try again shortly.' })
@@ -427,6 +439,12 @@ async function shutdown(signal) {
   }
 
   try {
+    await pubsub.close()
+  } catch (err) {
+    console.error('Failed to close the fan-out connection:', err?.message ?? err)
+  }
+
+  try {
     await runnerPool.shutdown()
     console.log('✅ Runner containers removed')
   } catch (err) {
@@ -438,4 +456,4 @@ async function shutdown(signal) {
 process.on('SIGINT', () => shutdown('SIGINT'))
 process.on('SIGTERM', () => shutdown('SIGTERM'))
 
-export { app, server, storage, runnerPool, access }
+export { app, server, storage, pubsub, runnerPool, access }

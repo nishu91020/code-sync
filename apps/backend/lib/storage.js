@@ -4,7 +4,7 @@
  * A storage adapter exposes:
  *   createRoom(docName, { hostName, hostTokenHash, update }) -> Promise<void>
  *   load(docName)                     -> Promise<Uint8Array | null>
- *   save(docName, update)             -> Promise<boolean>  false if the room does not exist
+ *   save(docName, update, { merge })  -> Promise<boolean>  false if the room does not exist
  *   getAccess(docName)                -> Promise<{ hostName, hostTokenHash, members } | null>
  *   addMember(docName, member)        -> Promise<void>
  *   removeMember(docName, memberId)   -> Promise<boolean>
@@ -13,11 +13,30 @@
  * Rooms are only ever created by `createRoom`; `save` never creates one, so a
  * document name that did not come from the API can never be persisted.
  *
+ * `merge` is set when several backend instances serve the same room: the
+ * incoming state is combined with what is already stored, so two instances
+ * flushing concurrently cannot lose each other's edits.
+ *
  * The Prisma adapter is used when DATABASE_URL is configured; otherwise rooms
  * live only in memory and are lost when the process exits.
  */
 
+import * as Y from 'yjs'
+
 const ROOM_PREFIX = 'room-'
+
+/**
+ * Combines two encoded Yjs states into one. Updates are commutative and
+ * idempotent, so the result never depends on which instance wrote last.
+ */
+function mergeSnapshots(stored, incoming) {
+  try {
+    return Y.mergeUpdates([new Uint8Array(stored), new Uint8Array(incoming)])
+  } catch (err) {
+    console.error('Failed to merge snapshots, keeping the newer one:', err.message)
+    return incoming
+  }
+}
 
 /** Derives the public room slug from a Yjs document name. */
 export function slugFromDocName(docName) {
@@ -40,10 +59,10 @@ export function createMemoryStorage() {
       return rooms.get(docName)?.snapshot ?? null
     },
 
-    async save(docName, update) {
+    async save(docName, update, { merge = false } = {}) {
       const room = rooms.get(docName)
       if (!room) return false
-      room.snapshot = update
+      room.snapshot = merge && room.snapshot ? mergeSnapshots(room.snapshot, update) : update
       return true
     },
 
@@ -98,9 +117,7 @@ export function createPrismaStorage(prisma) {
       return update ? new Uint8Array(update) : null
     },
 
-    async save(docName, update) {
-      const payload = Buffer.from(update)
-
+    async save(docName, update, { merge = false } = {}) {
       // `update`, never `upsert`: an unknown name must not turn into a room.
       const room = await prisma.room
         .update({
@@ -114,10 +131,30 @@ export function createPrismaStorage(prisma) {
         })
       if (!room) return false
 
-      await prisma.docState.upsert({
-        where: { roomId: room.id },
-        create: { roomId: room.id, update: payload, version: 1 },
-        update: { update: payload, version: { increment: 1 } }
+      if (!merge) {
+        const payload = Buffer.from(update)
+        await prisma.docState.upsert({
+          where: { roomId: room.id },
+          create: { roomId: room.id, update: payload, version: 1 },
+          update: { update: payload, version: { increment: 1 } }
+        })
+        return true
+      }
+
+      // Several instances may flush this room at once. The row is locked for
+      // the read-modify-write so the merge cannot be built on stale bytes.
+      await prisma.$transaction(async (tx) => {
+        const [existing] = await tx.$queryRaw`
+          SELECT "update" FROM "DocState" WHERE "roomId" = ${room.id} FOR UPDATE
+        `
+        const payload = Buffer.from(
+          existing?.update ? mergeSnapshots(existing.update, update) : update
+        )
+        await tx.docState.upsert({
+          where: { roomId: room.id },
+          create: { roomId: room.id, update: payload, version: 1 },
+          update: { update: payload, version: { increment: 1 } }
+        })
       })
       return true
     },

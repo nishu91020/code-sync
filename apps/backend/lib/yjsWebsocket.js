@@ -6,6 +6,14 @@ import * as encoding from 'lib0/encoding'
 import * as decoding from 'lib0/decoding'
 
 import { createMemoryStorage } from './storage.js'
+import {
+  PUBSUB_AWARENESS,
+  PUBSUB_SYNC_REQUEST,
+  PUBSUB_SYNC_RESPONSE,
+  PUBSUB_UPDATE,
+  channelFor,
+  createLocalPubSub
+} from './pubsub.js'
 
 // Message types defined by the y-websocket wire protocol. These must stay in
 // sync with the `y-websocket` client package.
@@ -25,6 +33,10 @@ const SAVE_DEBOUNCE = Number(process.env.SAVE_DEBOUNCE_MS || 5000)
 // Marks updates that came from storage so they are not written straight back.
 const PERSISTENCE_ORIGIN = Symbol('persistence')
 
+// Marks updates that arrived from another backend instance, so they are not
+// published again (which would bounce between instances forever).
+const REMOTE_ORIGIN = Symbol('remote')
+
 const WS_CONNECTING = 0
 const WS_OPEN = 1
 
@@ -42,9 +54,16 @@ export const roomEvents = new EventEmitter()
 
 let storage = createMemoryStorage()
 
+let pubsub = createLocalPubSub()
+
 /** Swaps in the storage adapter used for every subsequently loaded room. */
 export function setStorage(nextStorage) {
   storage = nextStorage
+}
+
+/** Swaps in the fan-out adapter used for every subsequently loaded room. */
+export function setPubSub(nextPubSub) {
+  pubsub = nextPubSub
 }
 
 export class WSSharedDoc extends Y.Doc {
@@ -68,8 +87,11 @@ export class WSSharedDoc extends Y.Doc {
     this.isDirty = false
     this.isActive = false
     this.storage = storage
+    this.pubsub = pubsub
+    this.channel = channelFor(name)
 
     this.whenLoaded = this.#hydrate()
+    this.whenSubscribed = this.#subscribe()
 
     this.awareness.on('update', ({ added, updated, removed }, origin) => {
       const changedClients = added.concat(updated, removed)
@@ -79,13 +101,15 @@ export class WSSharedDoc extends Y.Doc {
         removed.forEach((clientId) => controlledIds.delete(clientId))
       }
 
+      const update = awarenessProtocol.encodeAwarenessUpdate(this.awareness, changedClients)
+
       const encoder = encoding.createEncoder()
       encoding.writeVarUint(encoder, messageAwareness)
-      encoding.writeVarUint8Array(
-        encoder,
-        awarenessProtocol.encodeAwarenessUpdate(this.awareness, changedClients)
-      )
+      encoding.writeVarUint8Array(encoder, update)
       this.broadcast(encoding.toUint8Array(encoder))
+
+      // Presence must reach clients served by other instances too.
+      if (origin !== REMOTE_ORIGIN) this.#publish(PUBSUB_AWARENESS, update)
     })
 
     this.on('update', (update, origin) => {
@@ -97,7 +121,59 @@ export class WSSharedDoc extends Y.Doc {
       if (origin !== PERSISTENCE_ORIGIN) {
         this.#markDirty()
       }
+      // Hydration is local to this instance, and a remote update must not be
+      // echoed back to the instance it came from.
+      if (origin !== PERSISTENCE_ORIGIN && origin !== REMOTE_ORIGIN) {
+        this.#publish(PUBSUB_UPDATE, update)
+      }
     })
+  }
+
+  /** Fire-and-forget: a broker hiccup must never break local editing. */
+  #publish(kind, payload) {
+    if (!this.pubsub.isClustered) return
+    this.pubsub
+      .publish(this.channel, kind, payload)
+      .catch((err) => console.error(`Failed to publish ${this.name}:`, err.message))
+  }
+
+  /** Applies what other instances publish for this room. */
+  async #subscribe() {
+    if (!this.pubsub.isClustered) return
+    try {
+      await this.pubsub.subscribe(this.channel, (kind, payload) => {
+        switch (kind) {
+          case PUBSUB_UPDATE:
+          case PUBSUB_SYNC_RESPONSE:
+            Y.applyUpdate(this, payload, REMOTE_ORIGIN)
+            break
+
+          case PUBSUB_AWARENESS:
+            awarenessProtocol.applyAwarenessUpdate(this.awareness, payload, REMOTE_ORIGIN)
+            break
+
+          case PUBSUB_SYNC_REQUEST: {
+            // Answer with only what the asking instance is missing. Everyone
+            // on the channel applies it, which is harmless: Yjs updates are
+            // idempotent, so peers that already have it are unaffected.
+            const diff = Y.encodeStateAsUpdate(this, payload)
+            if (diff.byteLength > 0) this.#publish(PUBSUB_SYNC_RESPONSE, diff)
+            break
+          }
+
+          default:
+            break
+        }
+      })
+    } catch (err) {
+      console.error(`Failed to subscribe to ${this.channel}:`, err.message)
+      return
+    }
+
+    // The snapshot may lag a peer that is still inside its save debounce, so
+    // ask for the difference rather than trusting storage alone.
+    await this.whenLoaded
+    this.#publish(PUBSUB_SYNC_REQUEST, Y.encodeStateVector(this))
   }
 
   async #hydrate() {
@@ -134,7 +210,12 @@ export class WSSharedDoc extends Y.Doc {
     // Cleared before the await so concurrent edits re-mark the document.
     this.isDirty = false
     try {
-      await this.storage.save(this.name, Y.encodeStateAsUpdate(this))
+      await this.storage.save(this.name, Y.encodeStateAsUpdate(this), {
+        // With several instances the same room is flushed from more than one
+        // of them. Merging makes those writes commutative, so a slower
+        // instance cannot overwrite a newer snapshot with its own.
+        merge: this.pubsub.isClustered
+      })
     } catch (err) {
       this.isDirty = true
       throw err
@@ -186,6 +267,7 @@ function scheduleEviction(doc) {
     // Re-check: a client may have joined while the snapshot was being written.
     if (doc.conns.size === 0 && docs.get(doc.name) === doc) {
       docs.delete(doc.name)
+      await doc.pubsub.unsubscribe(doc.channel).catch(() => {})
       doc.destroy()
       console.log(`🧹 Evicted idle room: ${doc.name}`)
     }
@@ -359,8 +441,10 @@ async function startConnection(conn, doc, docName) {
 
   // Wait for any persisted snapshot so the client is not briefly shown an
   // empty document. Incoming client updates are already being applied and will
-  // merge with the loaded state.
+  // merge with the loaded state. The peer sync request goes out with it, so a
+  // room another instance already holds arrives up to date.
   await doc.whenLoaded
+  await doc.whenSubscribed
 
   if (!doc.conns.has(conn)) return
 
@@ -393,6 +477,7 @@ async function startConnection(conn, doc, docName) {
 export async function updateRoomState(docName, mapKey, patch) {
   const doc = getYDoc(docName)
   await doc.whenLoaded
+  await doc.whenSubscribed
   const map = doc.getMap(mapKey)
   doc.transact(() => {
     Object.entries(patch).forEach(([key, value]) => map.set(key, value))
@@ -403,6 +488,7 @@ export async function updateRoomState(docName, mapKey, patch) {
 export async function getRoomSource(docName, textKey = 'monaco') {
   const doc = getYDoc(docName)
   await doc.whenLoaded
+  await doc.whenSubscribed
   return doc.getText(textKey).toString()
 }
 
@@ -410,6 +496,7 @@ export async function getRoomSource(docName, textKey = 'monaco') {
 export async function getRoomState(docName, mapKey, key) {
   const doc = getYDoc(docName)
   await doc.whenLoaded
+  await doc.whenSubscribed
   return doc.getMap(mapKey).get(key)
 }
 
